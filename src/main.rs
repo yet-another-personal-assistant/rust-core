@@ -2,42 +2,50 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use futures::stream::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-fn build_dst(channel: &str, src: &Value) -> Option<Value> {
-    match channel {
-        "tg" => Some(json!({"channel": "tg",
-                            "chat_id": src["chat_id"]})),
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "channel", rename_all = "snake_case")]
+enum PaOrigin {
+    Tg { chat_id: i64, user_id: Option<i64> },
+    Brain { name: String },
+}
+
+fn build_dst(src: &PaOrigin) -> Option<PaOrigin> {
+    match src {
+        PaOrigin::Tg {
+            chat_id,
+            user_id: Some(user_id),
+        } if chat_id == user_id => Some(PaOrigin::Tg {
+            chat_id: *chat_id,
+            user_id: None,
+        }),
         _ => None,
     }
 }
 
-fn reply(message: Value) -> io::Result<Vec<Value>> {
-    let channel = if let Value::String(c) = &message["from"]["channel"] {
-        c
-    } else {
-        eprintln!(
-            "from-channel is not a string: {:?}",
-            &message["from"]["channel"]
-        );
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "from-channel is not a string",
-        ));
-    };
-    match build_dst(channel, &message["from"]) {
-        Some(dst) => Ok(vec![json!({
-            "text": ["Я не поняла",
-                     format!("А что значит {}?", message["text"])],
-            "to": dst,
-            "from": {"channel": "brain",
-                     "name": "niege"},
-        })]),
+#[derive(Serialize, Deserialize)]
+struct PaMsg {
+    from: PaOrigin,
+    to: PaOrigin,
+    text: Value,
+}
+
+fn reply(message: PaMsg) -> Vec<PaMsg> {
+    match build_dst(&message.from) {
+        Some(dst) => vec![PaMsg {
+            text: json!(["Я не поняла", format!("А что значит {}?", message.text)]),
+            to: dst,
+            from: PaOrigin::Brain {
+                name: String::from("niege"),
+            },
+        }],
         None => {
-            println!("Can't build destination to reply to {}", message["from"]);
-            Ok(vec![])
+            println!("Can't build destination to reply to {:?}", message.from);
+            vec![]
         }
     }
 }
@@ -48,22 +56,15 @@ async fn handle(mut client: TcpStream) -> io::Result<()> {
     let mut buffer = String::new();
 
     while reader.read_line(&mut buffer).await? > 0 {
-        let message = serde_json::from_str(&buffer);
-        match message {
-            Ok(r) => match reply(r) {
-                Ok(messages) => {
-                    for message in messages {
-                        let msg_str = format!("{}\n", serde_json::to_string(&message)?);
-                        writer.write(msg_str.as_bytes()).await?;
-                    }
-                }
-                Err(f) => {
-                    println!("Error building replies: {}", f.to_string());
-                }
-            },
-            Err(f) => {
+        let messages = serde_json::from_str(&buffer)
+            .map(reply)
+            .unwrap_or_else(|f| {
                 println!("Error parsing json: {}", f.to_string());
-            }
+                vec![]
+            });
+        for message in messages {
+            writer.write(&serde_json::to_vec(&message)?).await?;
+            writer.write(b"\n").await?;
         }
         buffer.clear();
     }

@@ -1,0 +1,10 @@
+[package]
+name = "core"
+version = "0.1.0"
+authors = ["aragaer <aragaer@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+futures = "0.3"
+serde_json = "1.0"
+tokio = { version = "0.2", features = ["io-util", "macros", "rt-core", "stream", "tcp"] }
